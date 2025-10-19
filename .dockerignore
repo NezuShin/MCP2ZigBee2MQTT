@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.env
+*.log
+*.db
+*.db-journal
+data/
+.DS_Store
+.idea
+*.iml
+README.md

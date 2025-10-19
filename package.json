@@ -1,0 +1,38 @@
+{
+  "name": "zigbee2mqtt-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for ZigBee2MQTT - Smart device discovery and control",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc && node dist/index.js",
+    "watch": "tsc --watch"
+  },
+  "keywords": [
+    "mcp",
+    "zigbee",
+    "mqtt",
+    "home-automation",
+    "zigbee2mqtt"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "mqtt": "^5.10.1",
+    "better-sqlite3": "^11.5.0",
+    "express": "^4.21.1",
+    "cors": "^2.8.5",
+    "eventsource": "^2.0.2",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.8.6",
+    "@types/express": "^5.0.0",
+    "@types/cors": "^2.8.17",
+    "typescript": "^5.6.3"
+  }
+}
