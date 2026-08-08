@@ -1,7 +1,7 @@
 import mqtt from 'mqtt';
 import { ZigbeeDatabase } from './database.js';
 import { SchemaDiscovery } from './schema-discovery.js';
-import { Z2MDevice } from './types.js';
+import { Z2MDevice, Z2MGroup } from './types.js';
 import { logger } from './logger.js';
 
 export interface MqttConfig {
@@ -116,7 +116,7 @@ export class MqttListener {
 
       // Handle bridge/groups
       if (topic === `${baseTopic}/bridge/groups`) {
-        logger.debug('Bridge groups received');
+        this.handleBridgeGroups(message);
         return;
       }
 
@@ -157,6 +157,21 @@ export class MqttListener {
       logger.debug(`Database: ${stats.deviceCount} devices, ${stats.fieldCount} fields, ${stats.capabilityCount} capabilities`);
     } catch (error) {
       logger.error('Error processing bridge/devices:', error);
+    }
+  }
+
+  private handleBridgeGroups(message: string): void {
+    try {
+      const groups: Z2MGroup[] = JSON.parse(message);
+      this.db.replaceGroups(
+        groups.map(group => ({
+          id: group.id,
+          friendly_name: group.friendly_name,
+        }))
+      );
+      logger.info(`Discovered ${groups.length} groups`);
+    } catch (error) {
+      logger.error('Error processing bridge/groups:', error);
     }
   }
 
@@ -220,7 +235,7 @@ export class MqttListener {
     return this.client?.connected || false;
   }
 
-  // Method to publish commands (for controlling devices)
+  // Method to publish commands (for controlling devices or groups)
   async publishCommand(friendlyName: string, command: Record<string, any>): Promise<void> {
     return new Promise((resolve, reject) => {
       if (!this.client || !this.client.connected) {

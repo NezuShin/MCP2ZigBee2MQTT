@@ -1,13 +1,17 @@
+import 'dotenv/config';
+import { randomUUID } from 'node:crypto';
 import { ZigbeeDatabase } from './database.js';
 import { MqttListener, MqttConfig } from './mqtt-listener.js';
 import { ZigbeeMcpServer } from './mcp-server.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
-import express from 'express';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import { logger } from './logger.js';
 
-// Load environment variables
+// Load environment variables (from process.env and optional .env file via dotenv)
 const config: MqttConfig = {
   brokerUrl: process.env.MQTT_BROKER_URL || 'mqtt://localhost:1883',
   username: process.env.MQTT_USERNAME || undefined,
@@ -35,54 +39,151 @@ async function startHttpMode(db: ZigbeeDatabase, mqtt: MqttListener) {
   app.use(cors());
   app.use(express.json());
 
-  const mcpServer = new ZigbeeMcpServer(db, mqtt, config.baseTopic);
+  // One Protocol/Server instance per client session (SDK forbids reuse)
+  const transports: Record<string, SSEServerTransport | StreamableHTTPServerTransport> = {};
+
+  const requireApiKey = (req: Request, res: Response, next: NextFunction) => {
+    if (!apiKey) {
+      next();
+      return;
+    }
+    const providedKey = req.headers['authorization']?.replace('Bearer ', '');
+    if (providedKey !== apiKey) {
+      res.status(401).json({ error: 'Unauthorized' });
+      return;
+    }
+    next();
+  };
 
   // Health check endpoint
-  app.get('/health', (req, res) => {
+  app.get('/health', (_req, res) => {
     const stats = db.getStats();
     res.json({
       status: 'ok',
       mqtt_connected: mqtt.isConnected(),
+      active_sessions: Object.keys(transports).length,
       ...stats,
     });
   });
 
-  // MCP SSE endpoint
-  app.get('/sse', async (req, res) => {
-    // Optional API key authentication
-    if (apiKey) {
-      const providedKey = req.headers['authorization']?.replace('Bearer ', '');
-      if (providedKey !== apiKey) {
-        res.status(401).json({ error: 'Unauthorized' });
+  // Streamable HTTP (preferred by newer MCP clients like LM Studio)
+  app.all('/mcp', requireApiKey, async (req, res) => {
+    try {
+      const sessionId = req.headers['mcp-session-id'] as string | undefined;
+      let transport: StreamableHTTPServerTransport;
+
+      if (sessionId && transports[sessionId]) {
+        const existing = transports[sessionId];
+        if (!(existing instanceof StreamableHTTPServerTransport)) {
+          res.status(400).json({
+            jsonrpc: '2.0',
+            error: {
+              code: -32000,
+              message: 'Bad Request: Session exists but uses a different transport protocol',
+            },
+            id: null,
+          });
+          return;
+        }
+        transport = existing;
+      } else if (!sessionId && req.method === 'POST' && isInitializeRequest(req.body)) {
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (sid) => {
+            logger.info(`Streamable HTTP session initialized: ${sid}`);
+            transports[sid] = transport;
+          },
+        });
+
+        transport.onclose = () => {
+          const sid = transport.sessionId;
+          if (sid && transports[sid]) {
+            logger.info(`Streamable HTTP session closed: ${sid}`);
+            delete transports[sid];
+          }
+        };
+
+        const mcpServer = new ZigbeeMcpServer(db, mqtt, config.baseTopic);
+        await mcpServer.connect(transport);
+      } else {
+        res.status(400).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32000,
+            message: 'Bad Request: No valid session ID provided',
+          },
+          id: null,
+        });
         return;
       }
-    }
 
-    logger.info('New SSE connection from:', req.ip);
-    const transport = new SSEServerTransport('/messages', res);
-    await mcpServer.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      logger.error('Error handling /mcp request:', error);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: { code: -32603, message: 'Internal server error' },
+          id: null,
+        });
+      }
+    }
   });
 
-  // MCP message endpoint (for POST requests from SSE)
-  app.post('/messages', async (req, res) => {
-    // Optional API key authentication
-    if (apiKey) {
-      const providedKey = req.headers['authorization']?.replace('Bearer ', '');
-      if (providedKey !== apiKey) {
-        res.status(401).json({ error: 'Unauthorized' });
-        return;
+  // Legacy SSE: GET establishes stream (one Server instance per connection)
+  app.get('/sse', requireApiKey, async (req, res) => {
+    try {
+      logger.info('New SSE connection from:', req.ip);
+      const transport = new SSEServerTransport('/messages', res);
+      const sessionId = transport.sessionId;
+      transports[sessionId] = transport;
+
+      transport.onclose = () => {
+        logger.info(`SSE session closed: ${sessionId}`);
+        delete transports[sessionId];
+      };
+
+      const mcpServer = new ZigbeeMcpServer(db, mqtt, config.baseTopic);
+      await mcpServer.connect(transport);
+      logger.info(`SSE session established: ${sessionId}`);
+    } catch (error) {
+      logger.error('Error establishing SSE stream:', error);
+      if (!res.headersSent) {
+        res.status(500).send('Error establishing SSE stream');
       }
     }
+  });
 
-    // This is handled by the SSE transport
-    res.status(200).end();
+  // Legacy SSE: POST client messages for a session
+  app.post('/messages', requireApiKey, async (req, res) => {
+    const sessionId = req.query.sessionId as string | undefined;
+    if (!sessionId) {
+      res.status(400).send('Missing sessionId parameter');
+      return;
+    }
+
+    const transport = transports[sessionId];
+    if (!transport || !(transport instanceof SSEServerTransport)) {
+      res.status(404).send('Session not found');
+      return;
+    }
+
+    try {
+      await transport.handlePostMessage(req, res, req.body);
+    } catch (error) {
+      logger.error('Error handling /messages request:', error);
+      if (!res.headersSent) {
+        res.status(500).send('Error handling request');
+      }
+    }
   });
 
   await new Promise<void>((resolve) => {
     app.listen(httpPort, () => {
       logger.startup(`✓ HTTP Server listening on port ${httpPort}`);
       logger.info(`  - Health: http://localhost:${httpPort}/health`);
-      logger.info(`  - MCP SSE: http://localhost:${httpPort}/sse`);
+      logger.info(`  - MCP (Streamable HTTP): http://localhost:${httpPort}/mcp`);
+      logger.info(`  - MCP SSE (legacy): http://localhost:${httpPort}/sse`);
       if (apiKey) {
         logger.info(`  - API Key authentication enabled`);
       }

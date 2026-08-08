@@ -61,6 +61,8 @@ export class ZigbeeMcpServer {
             return await this.handleGetDeviceState(args);
           case 'send_command':
             return await this.handleSendCommand(args);
+          case 'list_groups':
+            return await this.handleListGroups();
           case 'find_by_capability':
             return await this.handleFindByCapability(args);
           case 'get_integration_info':
@@ -141,13 +143,13 @@ export class ZigbeeMcpServer {
       },
       {
         name: 'send_command',
-        description: 'Send a command to control a device (e.g., turn on/off, set brightness)',
+        description: 'Send a command to control a device or group (e.g., turn on/off, set brightness). Groups use the same command format as devices.',
         inputSchema: {
           type: 'object',
           properties: {
             device: {
               type: 'string',
-              description: 'Device friendly name or IEEE address',
+              description: 'Device friendly name, IEEE address, or group friendly name / id',
             },
             command: {
               type: 'object',
@@ -155,6 +157,14 @@ export class ZigbeeMcpServer {
             },
           },
           required: ['device', 'command'],
+        },
+      },
+      {
+        name: 'list_groups',
+        description: 'List all ZigBee2MQTT groups that can be controlled with send_command',
+        inputSchema: {
+          type: 'object',
+          properties: {},
         },
       },
       {
@@ -338,17 +348,49 @@ export class ZigbeeMcpServer {
     const { device, command } = args;
     const dbDevice = this.db.getDevice(device);
 
-    if (!dbDevice) {
-      throw new Error(`Device not found: ${device}`);
+    if (dbDevice) {
+      await this.mqtt.publishCommand(dbDevice.friendly_name, command);
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Command sent to device ${dbDevice.friendly_name}: ${JSON.stringify(command)}`,
+          },
+        ],
+      };
     }
 
-    await this.mqtt.publishCommand(dbDevice.friendly_name, command);
+    const dbGroup = this.db.getGroup(device);
+    if (dbGroup) {
+      await this.mqtt.publishCommand(dbGroup.friendly_name, command);
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Command sent to group ${dbGroup.friendly_name}: ${JSON.stringify(command)}`,
+          },
+        ],
+      };
+    }
+
+    throw new Error(`Device or group not found: ${device}`);
+  }
+
+  private async handleListGroups() {
+    const groups = this.db.getAllGroups();
 
     return {
       content: [
         {
           type: 'text' as const,
-          text: `Command sent to ${dbDevice.friendly_name}: ${JSON.stringify(command)}`,
+          text: JSON.stringify(
+            groups.map(g => ({
+              id: g.id,
+              friendly_name: g.friendly_name,
+            })),
+            null,
+            2
+          ),
         },
       ],
     };

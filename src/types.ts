@@ -39,6 +39,13 @@ export interface DeviceState {
   updated_at: number;
 }
 
+// Database types for groups
+export interface DatabaseGroup {
+  id: number;
+  friendly_name: string;
+  updated_at?: number;
+}
+
 // ZigBee2MQTT types (from bridge/devices payload)
 export interface Z2MDevice {
   ieee_address: string;
@@ -55,6 +62,20 @@ export interface Z2MDevice {
   power_source?: string;
   disabled?: boolean;
   endpoints?: Record<string, any>;
+}
+
+// ZigBee2MQTT types (from bridge/groups payload)
+export interface Z2MGroup {
+  id: number;
+  friendly_name: string;
+  members?: Array<{
+    ieee_address: string;
+    endpoint: number;
+  }>;
+  scenes?: Array<{
+    id: number;
+    name: string;
+  }>;
 }
 
 export interface Z2MExpose {

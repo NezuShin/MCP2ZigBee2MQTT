@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { DatabaseDevice, DeviceField, DeviceCapability, DeviceState } from './types.js';
+import { DatabaseDevice, DatabaseGroup, DeviceField, DeviceCapability, DeviceState } from './types.js';
 
 export class ZigbeeDatabase {
   private db: Database.Database;
@@ -24,6 +24,16 @@ export class ZigbeeDatabase {
         updated_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_devices_friendly_name ON devices(friendly_name);
+    `);
+
+    // Groups table - Zigbee2MQTT groups (for control by friendly name)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS groups (
+        id INTEGER PRIMARY KEY,
+        friendly_name TEXT NOT NULL UNIQUE,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_groups_friendly_name ON groups(friendly_name);
     `);
 
     // Device fields - schema/structure of each device's data
@@ -235,20 +245,50 @@ export class ZigbeeDatabase {
     return stmt.all(cutoffTime) as DatabaseDevice[];
   }
 
+  // Group operations
+  replaceGroups(groups: DatabaseGroup[]): void {
+    const now = Date.now();
+    const replace = this.db.transaction((items: DatabaseGroup[]) => {
+      this.db.prepare('DELETE FROM groups').run();
+      const stmt = this.db.prepare(`
+        INSERT INTO groups (id, friendly_name, updated_at)
+        VALUES (?, ?, ?)
+      `);
+      for (const group of items) {
+        stmt.run(group.id, group.friendly_name, now);
+      }
+    });
+    replace(groups);
+  }
+
+  getGroup(identifier: string | number): DatabaseGroup | null {
+    const stmt = this.db.prepare(`
+      SELECT * FROM groups WHERE id = ? OR friendly_name = ?
+    `);
+    return stmt.get(identifier, String(identifier)) as DatabaseGroup | null;
+  }
+
+  getAllGroups(): DatabaseGroup[] {
+    const stmt = this.db.prepare('SELECT * FROM groups ORDER BY friendly_name');
+    return stmt.all() as DatabaseGroup[];
+  }
+
   // Utility
   close(): void {
     this.db.close();
   }
 
-  getStats(): { deviceCount: number; fieldCount: number; capabilityCount: number } {
+  getStats(): { deviceCount: number; fieldCount: number; capabilityCount: number; groupCount: number } {
     const deviceCount = this.db.prepare('SELECT COUNT(*) as count FROM devices').get() as { count: number };
     const fieldCount = this.db.prepare('SELECT COUNT(*) as count FROM device_fields').get() as { count: number };
     const capabilityCount = this.db.prepare('SELECT COUNT(*) as count FROM device_capabilities').get() as { count: number };
+    const groupCount = this.db.prepare('SELECT COUNT(*) as count FROM groups').get() as { count: number };
 
     return {
       deviceCount: deviceCount.count,
       fieldCount: fieldCount.count,
-      capabilityCount: capabilityCount.count
+      capabilityCount: capabilityCount.count,
+      groupCount: groupCount.count,
     };
   }
 }
